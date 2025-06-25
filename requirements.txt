@@ -2,4 +2,6 @@ streamlit
 pandas
 folium
 streamlit-folium
-numpy 
+numpy
+requests
+beautifulsoup4 

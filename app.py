@@ -26,6 +26,17 @@ def load_data():
     df.dropna(subset=['latitude', 'longitude'], inplace=True)
     return df
 
+@st.cache_data
+def load_areas_geojson():
+    """Loads areas data from the GeoJSON file."""
+    try:
+        with open('areas.geojson', 'r', encoding='utf-8') as f:
+            areas_data = json.load(f)
+        return areas_data
+    except Exception as e:
+        st.error(f"Error loading areas.geojson: {e}")
+        return None
+
 @st.cache_data(ttl=3600)  # Cache for 1 hour
 def get_media_from_bleau_page(area_name, bleau_info_id):
     """Fetch video and image information from bleau.info page if available."""
@@ -215,6 +226,9 @@ def numeric_to_grade(numeric):
 
 data = load_data()
 
+# Load areas data
+areas_data = load_areas_geojson()
+
 # Add numeric grade column for filtering
 data['grade_numeric'] = data['grade'].apply(grade_to_numeric)
 
@@ -271,6 +285,10 @@ sit_start_option = st.sidebar.radio("Start Type", ["All", "Sit Start Only", "Sta
 # Popularity filter
 min_popularity, max_popularity = int(data['popularity'].min()), int(data['popularity'].max())
 selected_popularity = st.sidebar.slider("Popularity Range", min_popularity, max_popularity, (0, max_popularity))
+
+# Map display options
+st.sidebar.header("🗺️ Map Options")
+show_areas = st.sidebar.checkbox("Show Areas", value=True, help="Display area boundaries and markers on the map")
 
 # Project list management
 st.sidebar.header("📋 Project List")
@@ -357,29 +375,106 @@ if len(filtered_data) <= 100:
 
     m = folium.Map(location=map_center, zoom_start=11, tiles="cartodbpositron")
 
+    # Add areas data to the map
+    if areas_data and show_areas:
+        # Create a feature group for areas
+        areas_group = folium.FeatureGroup(name="Areas", show=True)
+        
+        for feature in areas_data['features']:
+            properties = feature['properties']
+            geometry = feature['geometry']
+            
+            # Get area coordinates
+            if geometry['type'] == 'Point':
+                lat, lon = geometry['coordinates'][1], geometry['coordinates'][0]
+                
+                # Create bounding box rectangle if coordinates are available
+                if all(key in properties for key in ['southWestLat', 'southWestLon', 'northEastLat', 'northEastLon']):
+                    try:
+                        sw_lat = float(properties['southWestLat'])
+                        sw_lon = float(properties['southWestLon'])
+                        ne_lat = float(properties['northEastLat'])
+                        ne_lon = float(properties['northEastLon'])
+                        
+                        # Create rectangle for area boundary
+                        bounds = [[sw_lat, sw_lon], [ne_lat, ne_lon]]
+                        
+                        # Color based on priority (1=red, 2=orange, 3=yellow, etc.)
+                        priority = properties.get('priority', 1)
+                        colors = ['red', 'orange', 'yellow', 'green', 'blue', 'purple']
+                        color = colors[min(priority - 1, len(colors) - 1)]
+                        
+                        # Add rectangle to map
+                        folium.Rectangle(
+                            bounds=bounds,
+                            color=color,
+                            weight=2,
+                            fill=True,
+                            fillColor=color,
+                            fillOpacity=0.1,
+                            popup=folium.Popup(
+                                f"<b>{properties['name']}</b><br>"
+                                f"Area ID: {properties.get('areaId', 'N/A')}<br>"
+                                f"Priority: {properties.get('priority', 'N/A')}",
+                                max_width=200
+                            ),
+                            tooltip=properties['name']
+                        ).add_to(areas_group)
+                        
+                    except (ValueError, TypeError) as e:
+                        # If coordinates can't be parsed, just add a marker
+                        folium.Marker(
+                            location=[lat, lon],
+                            popup=folium.Popup(
+                                f"<b>{properties['name']}</b><br>"
+                                f"Area ID: {properties.get('areaId', 'N/A')}<br>"
+                                f"Priority: {properties.get('priority', 'N/A')}",
+                                max_width=200
+                            ),
+                            tooltip=properties['name'],
+                            icon=folium.Icon(color='blue', icon='info-sign')
+                        ).add_to(areas_group)
+                else:
+                    # Just add a marker if no bounding box
+                    folium.Marker(
+                        location=[lat, lon],
+                        popup=folium.Popup(
+                            f"<b>{properties['name']}</b><br>"
+                            f"Area ID: {properties.get('areaId', 'N/A')}<br>"
+                            f"Priority: {properties.get('priority', 'N/A')}",
+                            max_width=200
+                        ),
+                        tooltip=properties['name'],
+                        icon=folium.Icon(color='blue', icon='info-sign')
+                    ).add_to(areas_group)
+        
+        # Add areas group to map
+        areas_group.add_to(m)
+
     marker_cluster = MarkerCluster().add_to(m)
+
+    # Add layer control if areas data is available
+    if areas_data and show_areas:
+        folium.LayerControl().add_to(m)
 
     for idx, row in filtered_data.iterrows():
         # Create clickable route name for popup
         route_link = f"https://bleau.info/{row['area_name'].lower()}/{row['bleau_info_id']}.html"
         
-        # Get media information (removed the 10-route limit for testing)
         video_info = None
         image_info = None
-        media_html = ""
+        media_html = "This is not showing a video or image"
         
-        # Only fetch media for first 5 routes to avoid too many requests
-        if idx < 5:
-            video_info, image_info = get_media_from_bleau_page(row['area_name'], row['bleau_info_id'])
-            
-            if video_info:
-                media_html = create_video_html(video_info)
-                print(f"DEBUG: Created video HTML for {row['name']}: {media_html[:100]}...")
-            elif image_info:
-                media_html = create_image_html(image_info)
-                print(f"DEBUG: Created image HTML for {row['name']}: {media_html[:100]}...")
-            else:
-                print(f"DEBUG: No media found for {row['name']}")
+        video_info, image_info = get_media_from_bleau_page(row['area_name'], row['bleau_info_id'])
+        
+        if video_info:
+            media_html = create_video_html(video_info)
+            print(f"DEBUG: Created video HTML for {row['name']}: {media_html[:100]}...")
+        elif image_info:
+            media_html = create_image_html(image_info)
+            print(f"DEBUG: Created image HTML for {row['name']}: {media_html[:100]}...")
+        else:
+            print(f"DEBUG: No media found for {row['name']}")
         
         popup_html = f"""
         <div style="min-width: 300px; max-width: 500px;">
@@ -432,13 +527,13 @@ if len(filtered_data) <= 100:
         
         # Add route links to Route Name column and media columns
         def create_route_link(row):
-            route_link = f"https://bleau.info/{row['area_name'].lower()}/{row['bleau_info_id']}.html"
+            route_link = f"https://bleau.info/{row['area_name'].lower()}/{row['bleau_info_id']}.html?route_name={row['name']}"
             return route_link
         
         def create_image_column(row):
             """Create image column with image if available (only for ≤10 total routes)."""
             total_routes = len(combined_data)
-            if total_routes > 10:
+            if total_routes > 100:
                 return None
             
             try:
@@ -454,8 +549,6 @@ if len(filtered_data) <= 100:
         # Create media column and replace route names with URLs for LinkColumn
         editor_df['Image'] = editor_df.apply(create_image_column, axis=1)
         
-        # Store original route names for reference
-        editor_df['Original Name'] = editor_df['name']
         
         # Replace route names with URLs for LinkColumn functionality
         editor_df['name'] = editor_df.apply(create_route_link, axis=1)
@@ -483,6 +576,7 @@ if len(filtered_data) <= 100:
                     "Route Name",
                     help="Click to view on bleau.info",
                     disabled=True,
+                    display_text=r"https:\/\/bleau\.info\/.*?\?route_name=([^&]*)",
                 ),
                 "Grade": st.column_config.TextColumn(
                     "Grade",
@@ -505,7 +599,6 @@ if len(filtered_data) <= 100:
                     help="Route image from bleau.info",
                 ),
             },
-            disabled=["Route Name", "Grade", "Steepness", "Area", "Popularity", "bleau_info_id"],
             hide_index=True,
             use_container_width=True,
         )
